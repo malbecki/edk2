@@ -2457,7 +2457,12 @@ Done:
     SdMmcHcLedOnOff (Private->PciIo, Trb->Slot, FALSE);
   }
 
-  return Status;
+  if ((Trb->Packet->SdMmcCmdBlk->CommandIndex == EMMC_SEND_STATUS) && (Status == EFI_SUCCESS) && (Trb->Retries == 5)) {
+    DEBUG ((DEBUG_INFO, "Simulated CRC error!\n"));
+    return EFI_CRC_ERROR;
+  } else {
+    return Status;
+  }
 }
 
 /**

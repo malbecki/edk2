@@ -1019,6 +1019,7 @@ SdMmcPassThruExecSyncTrb (
 
     Status = SdMmcWaitTrbResult (Private, Trb);
     if (Status == EFI_CRC_ERROR) {
+      DEBUG ((DEBUG_INFO, "CRC error, retrying!\n"));
       Trb->Retries--;
     } else {
       return Status;
