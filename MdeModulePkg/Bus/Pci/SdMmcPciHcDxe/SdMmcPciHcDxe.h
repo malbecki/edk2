@@ -153,6 +153,7 @@ typedef struct {
 
   EFI_EVENT                           Event;
   BOOLEAN                             Started;
+  BOOLEAN                             CommandComplete;
   UINT64                              Timeout;
   UINT32                              Retries;
 
