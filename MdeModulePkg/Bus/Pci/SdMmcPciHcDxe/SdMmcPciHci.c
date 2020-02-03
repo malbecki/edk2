@@ -1711,6 +1711,8 @@ SdMmcPrintTrb (
   DEBUG ((DebugLevel, "CommandComplete: %d\n", Trb->CommandComplete));
   DEBUG ((DebugLevel, "Timeout: %d\n", Trb->Timeout));
   DEBUG ((DebugLevel, "Retries: %d\n", Trb->Retries));
+  DEBUG ((DebugLevel, "PioModeTransferCompleted: %d\n", Trb->PioModeTransferCompleted));
+  DEBUG ((DebugLevel, "PioBlockIndex: %d\n", Trb->PioBlockIndex));
   DEBUG ((DebugLevel, "Adma32Desc: %X\n", Trb->Adma32Desc));
   DEBUG ((DebugLevel, "Adma64V3Desc: %X\n", Trb->Adma64V3Desc));
   DEBUG ((DebugLevel, "Adma64V4Desc: %X\n", Trb->Adma64V4Desc));
@@ -1762,6 +1764,8 @@ SdMmcCreateTrb (
   Trb->CommandComplete = FALSE;
   Trb->Timeout   = Packet->Timeout;
   Trb->Retries   = SD_MMC_TRB_RETRIES;
+  Trb->PioModeTransferCompleted = FALSE;
+  Trb->PioBlockIndex = 0;
   Trb->Private   = Private;
 
   if ((Packet->InTransferLength != 0) && (Packet->InDataBuffer != NULL)) {
@@ -2448,6 +2452,85 @@ SdMmcCheckCommandComplete (
 }
 
 /**
+  Transfers data from card using PIO method.
+
+  @param[in] Private    A pointer to the SD_MMC_HC_PRIVATE_DATA instance.
+  @param[in] Trb        The pointer to the SD_MMC_HC_TRB instance.
+  @param[in] IntStatus  Snapshot of the normal interrupt status register.
+
+  @retval EFI_SUCCESS   PIO transfer completed successfully.
+  @retval EFI_NOT_READY PIO transfer completion still pending.
+  @retval Others        PIO transfer failed to complete.
+**/
+EFI_STATUS
+SdMmcTransferDataWithPio (
+  IN SD_MMC_HC_PRIVATE_DATA  *Private,
+  IN SD_MMC_HC_TRB           *Trb,
+  IN UINT16                  IntStatus
+  )
+{
+  EFI_STATUS  Status;
+  UINT16      Data16;
+  UINT32      BlockCount;
+
+  BlockCount = (Trb->DataLen / Trb->BlockSize);
+  if (Trb->DataLen % Trb->BlockSize != 0) {
+    BlockCount += 1;
+  }
+
+  if (Trb->PioBlockIndex >= BlockCount) {
+    return EFI_SUCCESS;
+  }
+
+  if (Trb->Read) {
+    if ((IntStatus & BIT5) == 0) {
+      return EFI_NOT_READY;
+    }
+    Data16 = BIT5;
+    SdMmcHcRwMmio (Private->PciIo, Trb->Slot, SD_MMC_HC_NOR_INT_STS, FALSE, sizeof (Data16), &Data16);
+
+    Status = Private->PciIo->Mem.Read (
+               Private->PciIo,
+               EfiPciIoWidthFifoUint8,
+               Trb->Slot,
+               SD_MMC_HC_BUF_DAT_PORT,
+               Trb->BlockSize,
+               (VOID*)((UINT8*)Trb->Data + (Trb->BlockSize * Trb->PioBlockIndex))
+               );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    Trb->PioBlockIndex++;
+  } else {
+    if ((IntStatus & BIT4) == 0) {
+      return EFI_NOT_READY;
+    }
+    Data16 = BIT4;
+    SdMmcHcRwMmio (Private->PciIo, Trb->Slot, SD_MMC_HC_NOR_INT_STS, FALSE, sizeof (Data16), &Data16);
+
+    Status = Private->PciIo->Mem.Write (
+               Private->PciIo,
+               EfiPciIoWidthFifoUint8,
+               Trb->Slot,
+               SD_MMC_HC_BUF_DAT_PORT,
+               Trb->BlockSize,
+               (VOID*)((UINT8*)Trb->Data + (Trb->BlockSize * Trb->PioBlockIndex))
+               );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+    Trb->PioBlockIndex++;
+  }
+
+  if (Trb->PioBlockIndex >= BlockCount) {
+    Trb->PioModeTransferCompleted = TRUE;
+    return EFI_SUCCESS;
+  } else {
+    return EFI_NOT_READY;
+  }
+}
+
+/**
   Update the SDMA address on the SDMA buffer boundary interrupt.
 
   @param[in] Private    A pointer to the SD_MMC_HC_PRIVATE_DATA instance.
@@ -2531,6 +2614,13 @@ SdMmcCheckDataTransfer (
     return Status;
   }
 
+  if (Trb->Mode == SdMmcPioMode && !Trb->PioModeTransferCompleted) {
+    Status = SdMmcTransferDataWithPio (Private, Trb, IntStatus);
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
   if ((Trb->Mode == SdMmcSdmaMode) && ((IntStatus & BIT3) != 0)) {
     Data16 = BIT3;
     Status = SdMmcHcRwMmio (
@@ -2573,7 +2663,6 @@ SdMmcCheckTrbResult (
   EFI_STATUS                          Status;
   EFI_SD_MMC_PASS_THRU_COMMAND_PACKET *Packet;
   UINT16                              IntStatus;
-  UINT32                              PioLength;
 
   Packet  = Trb->Packet;
   //
@@ -2609,26 +2698,8 @@ SdMmcCheckTrbResult (
        (Packet->SdMmcCmdBlk->CommandIndex == EMMC_SEND_TUNING_BLOCK)) ||
       ((Private->Slot[Trb->Slot].CardType == SdCardType) &&
        (Packet->SdMmcCmdBlk->CommandIndex == SD_SEND_TUNING_BLOCK))) {
-    //
-    // When performing tuning procedure (Execute Tuning is set to 1) through PIO mode,
-    // wait Buffer Read Ready bit of Normal Interrupt Status Register to be 1.
-    // Refer to SD Host Controller Simplified Specification 3.0 figure 2-29 for details.
-    //
-    if ((IntStatus & BIT5) == BIT5) {
-      //
-      // Clear Buffer Read Ready interrupt at first.
-      //
-      IntStatus = BIT5;
-      SdMmcHcRwMmio (Private->PciIo, Trb->Slot, SD_MMC_HC_NOR_INT_STS, FALSE, sizeof (IntStatus), &IntStatus);
-      //
-      // Read data out from Buffer Port register
-      //
-      for (PioLength = 0; PioLength < Trb->DataLen; PioLength += 4) {
-        SdMmcHcRwMmio (Private->PciIo, Trb->Slot, SD_MMC_HC_BUF_DAT_PORT, TRUE, 4, (UINT8*)Trb->Data + PioLength);
-      }
-      Status = EFI_SUCCESS;
-      goto Done;
-    }
+    Status = SdMmcTransferDataWithPio (Private, Trb, IntStatus);
+    goto Done;
   }
 
   if (!Trb->CommandComplete) {
