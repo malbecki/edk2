@@ -1818,28 +1818,6 @@ SdMmcCreateTrb (
 
     if (Trb->DataLen == 0) {
       Trb->Mode = SdMmcNoData;
-    } else if (Private->Capability[Slot].Adma2 != 0) {
-      Trb->Mode = SdMmcAdma32bMode;
-      Trb->AdmaLengthMode = SdMmcAdmaLen16b;
-      if ((Private->ControllerVersion[Slot] == SD_MMC_HC_CTRL_VER_300) &&
-          (Private->Capability[Slot].SysBus64V3 == 1)) {
-        Trb->Mode = SdMmcAdma64bV3Mode;
-      } else if (((Private->ControllerVersion[Slot] == SD_MMC_HC_CTRL_VER_400) &&
-                  (Private->Capability[Slot].SysBus64V3 == 1)) ||
-                 ((Private->ControllerVersion[Slot] >= SD_MMC_HC_CTRL_VER_410) &&
-                  (Private->Capability[Slot].SysBus64V4 == 1))) {
-        Trb->Mode = SdMmcAdma64bV4Mode;
-      }
-      if (Private->ControllerVersion[Slot] >= SD_MMC_HC_CTRL_VER_410) {
-        Trb->AdmaLengthMode = SdMmcAdmaLen26b;
-      }
-      Status = BuildAdmaDescTable (Trb, Private->ControllerVersion[Slot]);
-      if (EFI_ERROR (Status)) {
-        PciIo->Unmap (PciIo, Trb->DataMap);
-        goto Error;
-      }
-    } else if (Private->Capability[Slot].Sdma != 0) {
-      Trb->Mode = SdMmcSdmaMode;
     } else {
       Trb->Mode = SdMmcPioMode;
     }
