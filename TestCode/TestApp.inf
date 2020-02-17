@@ -1,0 +1,30 @@
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = TestCode
+  FILE_GUID                      = 819A8874-D215-4ABB-9EF2-7A80128560E0
+  VERSION_STRING                 = 1.0
+  MODULE_TYPE                    = UEFI_APPLICATION
+  ENTRY_POINT                    = TestAppEntry
+
+[Sources]
+  TestApp.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  UefiApplicationEntryPoint
+  BaseLib
+  BaseMemoryLib
+  PcdLib
+  DebugLib
+  IoLib
+  HobLib
+
+[Protocols]
+  gEfiSdMmcPassThruProtocolGuid                 ## BY_START
+  gEfiBlockIo2ProtocolGuid ## CONSUMES
