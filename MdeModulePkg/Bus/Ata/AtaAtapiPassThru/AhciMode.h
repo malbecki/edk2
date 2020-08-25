@@ -96,7 +96,7 @@ typedef union {
 #define EFI_AHCI_PORT_IS                       0x0010
 #define   EFI_AHCI_PORT_IS_DHRS                BIT0
 #define   EFI_AHCI_PORT_IS_PSS                 BIT1
-#define   EFI_AHCI_PORT_IS_SSS                 BIT2
+#define   EFI_AHCI_PORT_IS_DSS                 BIT2
 #define   EFI_AHCI_PORT_IS_SDBS                BIT3
 #define   EFI_AHCI_PORT_IS_UFS                 BIT4
 #define   EFI_AHCI_PORT_IS_DPS                 BIT5
