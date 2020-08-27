@@ -608,6 +608,142 @@ AhciBuildCommandFis (
   CmdFis->AhciCFisDevHead     = (UINT8) (AtaCommandBlock->AtaDeviceHead | 0xE0);
 }
 
+/**
+  Wait until SATA device reports it is ready for operation.
+
+  @param[in] PciIo    Pointer to AHCI controller PciIo.
+  @param[in] Port     SATA port index on which to reset.
+
+  @retval EFI_SUCCESS  Device ready for operation.
+  @retval EFI_TIMEOUT  Device failed to get ready within required period.
+**/
+EFI_STATUS
+AhciWaitDeviceReady (
+  IN EFI_PCI_IO_PROTOCOL  *PciIo,
+  IN UINT8                Port
+   )
+{
+  UINT32      PhyDetectDelay;
+  UINT32      Data;
+  UINT32      Offset;
+
+  //
+  // According to SATA1.0a spec section 5.2, we need to wait for PxTFD.BSY and PxTFD.DRQ
+  // and PxTFD.ERR to be zero. The maximum wait time is 16s which is defined at ATA spec.
+  //
+  PhyDetectDelay = 16 * 1000;
+  do {
+    Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_SERR;
+    if (AhciReadReg(PciIo, Offset) != 0) {
+      AhciWriteReg (PciIo, Offset, AhciReadReg(PciIo, Offset));
+    }
+    Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_TFD;
+
+    Data = AhciReadReg (PciIo, Offset) & EFI_AHCI_PORT_TFD_MASK;
+    if (Data == 0) {
+      break;
+    }
+
+    MicroSecondDelay (1000);
+    PhyDetectDelay--;
+  } while (PhyDetectDelay > 0);
+
+  if (PhyDetectDelay == 0) {
+    DEBUG ((DEBUG_ERROR, "Port %d Device not ready (TFD=0x%X)\n", Port, Data));
+    return EFI_TIMEOUT;
+  } else {
+    return EFI_SUCCESS;
+  }
+}
+
+
+/**
+  Reset the SATA port.
+
+  @param[in] PciIo    Pointer to AHCI controller PciIo.
+  @param[in] Port     SATA port index on which to reset.
+
+  @retval EFI_SUCCESS  Port reset.
+  @retval Others       Failed to reset the port.
+**/
+EFI_STATUS
+AhciResetPort (
+  IN EFI_PCI_IO_PROTOCOL  *PciIo,
+  IN UINT8                Port
+  )
+{
+  UINT32      Offset;
+  EFI_STATUS  Status;
+
+  Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_SCTL;
+  AhciOrReg (PciIo, Offset, EFI_AHCI_PORT_SCTL_DET_INIT);
+  //
+  // SW is required to keep DET set to 0x1 at least for 1 milisecond to ensure that
+  // at least one COMRESET signal is sent.
+  //
+  MicroSecondDelay(1000);
+  AhciAndReg (PciIo, Offset, ~(UINT32)EFI_AHCI_PORT_SSTS_DET_MASK);
+
+  Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_SSTS;
+  Status = AhciWaitMmioSet (PciIo, Offset, EFI_AHCI_PORT_SSTS_DET_MASK, EFI_AHCI_PORT_SSTS_DET_PCE, ATA_ATAPI_TIMEOUT);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  return AhciWaitDeviceReady (PciIo, Port);
+}
+
+/**
+  Recovers the SATA port from error condition.
+
+  @param[in] PciIo    Pointer to AHCI controller PciIo.
+  @param[in] Port     SATA port index on which to check.
+
+  @retval EFI_SUCCESS  Port recovered.
+  @retval Others       Failed to recover port.
+**/
+EFI_STATUS
+AhciRecoverPortError (
+  IN EFI_PCI_IO_PROTOCOL  *PciIo,
+  IN UINT8                Port
+  )
+{
+  UINT32      Offset;
+  UINT32      PortInterrupt;
+  UINT32      PortTfd;
+  EFI_STATUS  Status;
+
+  Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_IS;
+  PortInterrupt = AhciReadReg (PciIo, Offset);
+  if ((PortInterrupt & (EFI_AHCI_PORT_IS_IFS | EFI_AHCI_PORT_IS_HBDS | EFI_AHCI_PORT_IS_HBFS | EFI_AHCI_PORT_IS_TFES)) == 0) {
+    //
+    // No fatal error detected. Exit with success as port should still be operational.
+    // No need to clear IS as it will be cleared when the next command starts.
+    //
+    return EFI_SUCCESS;
+  }
+
+  Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_CMD;
+  AhciAndReg (PciIo, Offset, ~(UINT32)EFI_AHCI_PORT_CMD_ST);
+
+  Status = AhciWaitMmioSet (PciIo, Offset, EFI_AHCI_PORT_CMD_CR, 0, ATA_ATAPI_TIMEOUT);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Ahci port %d is in hung state, aborting recovery\n", Port));
+    return Status;
+  }
+
+  Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_TFD;
+  PortTfd = AhciReadReg (PciIo, Offset);
+  if ((PortTfd & (EFI_AHCI_PORT_TFD_BSY | EFI_AHCI_PORT_TFD_DRQ)) != 0) {
+    Status = AhciResetPort (PciIo, Port);
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR, "Failed to reset the port %d\n", Port));
+    }
+  }
+
+  return EFI_SUCCESS;
+}
+
 typedef enum {
   SataFisD2H = 0,
   SataFisPioSetup,
@@ -833,6 +969,10 @@ AhciPioTransfer (
     Status = AhciWaitUntilFisReceived (PciIo, Port, Timeout, SataFisD2H);
   }
 
+  if (Status == EFI_DEVICE_ERROR) {
+    AhciRecoverPortError (PciIo, Port);
+  }
+
 Exit:
   AhciStopCommand (
     PciIo,
@@ -1002,7 +1142,9 @@ AhciDmaTransfer (
 
   if (Task != NULL) {
     Status = AhciCheckFisReceived (PciIo, Port, SataFisD2H);
-    if (Status == EFI_NOT_READY) {
+    if (Status == EFI_DEVICE_ERROR) {
+      AhciRecoverPortError (PciIo, Port);
+    } else if (Status == EFI_NOT_READY) {
       if (!Task->InfiniteWait && Task->RetryTimes == 0) {
         Status = EFI_TIMEOUT;
       } else {
@@ -1011,6 +1153,9 @@ AhciDmaTransfer (
     }
   } else {
     Status = AhciWaitUntilFisReceived (PciIo, Port, Timeout, SataFisD2H);
+    if (Status == EFI_DEVICE_ERROR) {
+      AhciRecoverPortError (PciIo, Port);
+    }
   }
 
 Exit:
@@ -1125,6 +1270,9 @@ AhciNonDataTransfer (
   }
 
   Status = AhciWaitUntilFisReceived (PciIo, Port, Timeout, SataFisD2H);
+  if (Status == EFI_DEVICE_ERROR) {
+    AhciRecoverPortError (PciIo, Port);
+  }
 
 Exit:
   AhciStopCommand (
@@ -2589,29 +2737,8 @@ AhciModeInitialization (
         continue;
       }
 
-      //
-      // According to SATA1.0a spec section 5.2, we need to wait for PxTFD.BSY and PxTFD.DRQ
-      // and PxTFD.ERR to be zero. The maximum wait time is 16s which is defined at ATA spec.
-      //
-      PhyDetectDelay = 16 * 1000;
-      do {
-        Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_SERR;
-        if (AhciReadReg(PciIo, Offset) != 0) {
-          AhciWriteReg (PciIo, Offset, AhciReadReg(PciIo, Offset));
-        }
-        Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_TFD;
-
-        Data = AhciReadReg (PciIo, Offset) & EFI_AHCI_PORT_TFD_MASK;
-        if (Data == 0) {
-          break;
-        }
-
-        MicroSecondDelay (1000);
-        PhyDetectDelay--;
-      } while (PhyDetectDelay > 0);
-
-      if (PhyDetectDelay == 0) {
-        DEBUG ((EFI_D_ERROR, "Port %d Device presence detected but phy not ready (TFD=0x%X)\n", Port, Data));
+      Status = AhciWaitDeviceReady (PciIo, Port);
+      if (EFI_ERROR (Status)) {
         continue;
       }
 
