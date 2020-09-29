@@ -709,19 +709,7 @@ AhciRecoverPortError (
   )
 {
   UINT32      Offset;
-  UINT32      PortInterrupt;
-  UINT32      PortTfd;
   EFI_STATUS  Status;
-
-  Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_IS;
-  PortInterrupt = AhciReadReg (PciIo, Offset);
-  if ((PortInterrupt & (EFI_AHCI_PORT_IS_IFS | EFI_AHCI_PORT_IS_HBDS | EFI_AHCI_PORT_IS_HBFS | EFI_AHCI_PORT_IS_TFES)) == 0) {
-    //
-    // No fatal error detected. Exit with success as port should still be operational.
-    // No need to clear IS as it will be cleared when the next command starts.
-    //
-    return EFI_SUCCESS;
-  }
 
   Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_CMD;
   AhciAndReg (PciIo, Offset, ~(UINT32)EFI_AHCI_PORT_CMD_ST);
@@ -732,13 +720,9 @@ AhciRecoverPortError (
     return Status;
   }
 
-  Offset = EFI_AHCI_PORT_START + Port * EFI_AHCI_PORT_REG_WIDTH + EFI_AHCI_PORT_TFD;
-  PortTfd = AhciReadReg (PciIo, Offset);
-  if ((PortTfd & (EFI_AHCI_PORT_TFD_BSY | EFI_AHCI_PORT_TFD_DRQ)) != 0) {
-    Status = AhciResetPort (PciIo, Port);
-    if (EFI_ERROR (Status)) {
-      DEBUG ((DEBUG_ERROR, "Failed to reset the port %d\n", Port));
-    }
+  Status = AhciResetPort (PciIo, Port);
+  if (EFI_ERROR (Status)) {
+    DEBUG ((DEBUG_ERROR, "Failed to reset the port %d\n", Port));
   }
 
   return EFI_SUCCESS;
@@ -1193,7 +1177,7 @@ AhciDmaTransfer (
         break;
       }
       Status = AhciWaitUntilFisReceived (PciIo, Port, Timeout, SataFisD2H);
-      if (Status == EFI_DEVICE_ERROR) {
+      if (Status == EFI_DEVICE_ERROR || Retry == 0) {
         Status = AhciRecoverPortError (PciIo, Port);
         if (EFI_ERROR (Status)) {
           break;
